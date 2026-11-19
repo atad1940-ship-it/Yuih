@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>إدارة النماذج</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--tx:#1c1e21;--mu:#6b7280;--pr:#0f766e;--pt:#fff;--bd:#d9dde3;--er:#b91c1c;--ok:#15803d}
+@media(prefers-color-scheme:dark){:root{--bg:#111418;--card:#1b2026;--tx:#eef0f2;--mu:#9aa3ad;--pr:#2dd4bf;--pt:#042f2e;--bd:#333b44;--er:#f87171;--ok:#4ade80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.6 system-ui,"Segoe UI",Tahoma,sans-serif}
+main{max-width:640px;margin:0 auto;padding:12px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:10px}
+.bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.tabs{display:flex;gap:6px;margin-bottom:10px}
+.tabs button{flex:1;background:var(--card);color:var(--tx);border:1px solid var(--bd)}
+.tabs button.on{background:var(--pr);color:var(--pt);border-color:var(--pr)}
+label{display:block;font-weight:600;margin:8px 0 4px}
+input,select,textarea{width:100%;padding:10px;border:1px solid var(--bd);border-radius:8px;background:var(--card);color:var(--tx);font:inherit;margin-bottom:6px}
+button{padding:10px 14px;border:0;border-radius:10px;background:var(--pr);color:var(--pt);font:inherit;font-weight:700;margin:2px 0}
+button.ghost{background:transparent;color:var(--tx);border:1px solid var(--bd)}
+button.x{background:transparent;color:var(--er);padding:2px 10px}
+.row{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--bd);padding:4px 0}
+.mu{color:var(--mu);font-size:14px}.er{color:var(--er)}.ok{color:var(--ok)}
+.opt{display:flex;gap:8px;align-items:center;font-weight:400}.opt input{width:auto;margin:0}
+.btns{display:flex;flex-wrap:wrap;gap:6px}
+details{border-bottom:1px solid var(--bd);padding:6px 0}summary{cursor:pointer}
+#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#222;color:#fff;padding:8px 16px;border-radius:20px;display:none;z-index:9}
+</style>
+</head>
+<body>
+<main id="app"></main>
+<div id="toast"></div>
+<script>
+const DB="https://katiba-b2d0b-default-rtdb.firebaseio.com";
+const KEY="AIzaSyACO_l6eiPxYZkaefbtjP7rliZeXZYEKug";
+const SITE=location.origin+location.pathname.replace(/admin\.html$/,"").replace(/\/?$/,"/");
+const TYPES=[["text","نص قصير"],["long","نص طويل"],["number","رقم"],["date","تاريخ"],["yesno","نعم / لا"],["choice","اختيار من قائمة"]];
+const $=s=>document.querySelector(s);
+const h=(t,a,...k)=>{const e=document.createElement(t);for(const x in a||{}){const v=a[x];if(x==="class")e.className=v;else if(x.startsWith("on"))e.addEventListener(x.slice(2),v);else if(["value","checked","disabled","selected"].includes(x))e[x]=v;else e.setAttribute(x,v)}k.flat().forEach(c=>{if(c!=null&&c!==false)e.append(c)});return e};
+let tt;const toast=t=>{const e=$("#toast");e.textContent=t;e.style.display="block";clearTimeout(tt);tt=setTimeout(()=>e.style.display="none",2500)};
+const copy=async t=>{try{await navigator.clipboard.writeText(t);toast("تم النسخ")}catch{prompt("انسخ النص:",t)}};
+const link=id=>SITE+"?f="+id;
+
+/* ---- auth ---- */
+let S=null;try{S=JSON.parse(localStorage.getItem("kb_auth")||"null")}catch{}
+const keep=()=>{try{S?localStorage.setItem("kb_auth",JSON.stringify(S)):localStorage.removeItem("kb_auth")}catch{}};
+async function token(){
+  if(!S)throw new Error("auth");
+  if(S.exp>Date.now()+60000)return S.id;
+  const r=await fetch("https://securetoken.googleapis.com/v1/token?key="+KEY,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"grant_type=refresh_token&refresh_token="+encodeURIComponent(S.refresh)});
+  const j=await r.json();if(!r.ok){S=null;keep();throw new Error("auth")}
+  S={id:j.id_token,refresh:j.refresh_token,exp:Date.now()+ +j.expires_in*1000};keep();return S.id;
+}
+async function db(p,m="GET",b){
+  const t=await token();
+  const r=await fetch(`${DB}/${p}.json?auth=${t}`,{method:m,body:b===undefined?undefined:JSON.stringify(b)});
+  if(!r.ok)throw new Error("db "+r.status);return r.json();
+}
+async function login(email,pw){
+  const r=await fetch("https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key="+KEY,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password:pw,returnSecureToken:true})});
+  const j=await r.json();
+  if(!r.ok){const m=(j.error&&j.error.message)||"";
+    throw new Error(/CONFIGURATION_NOT_FOUND|OPERATION_NOT_ALLOWED/.test(m)?"فعّل Email/Password في Firebase Authentication":/INVALID|EMAIL_NOT_FOUND|PASSWORD/.test(m)?"البريد أو كلمة المرور غير صحيحة":"تعذّر تسجيل الدخول")}
+  S={id:j.idToken,refresh:j.refreshToken,exp:Date.now()+ +j.expiresIn*1000};keep();
+}
+
+/* ---- state ---- */
+let P={},F={},tab="people",cur=null,draft=null,flt="all";
+const newDraft=()=>({title:"",desc:"",qs:[{t:"",type:"text",opts:"",req:true}]});
+const byName=(a,b)=>P[a].name.localeCompare(P[b].name,"ar");
+
+async function show(){
+  const app=$("#app");
+  if(!S){
+    const em=h("input",{type:"email",placeholder:"البريد",dir:"ltr"}),pw=h("input",{type:"password",placeholder:"كلمة المرور",dir:"ltr"}),er=h("p",{class:"er"});
+    const go=async()=>{er.textContent="";try{await login(em.value.trim(),pw.value);show()}catch(e){er.textContent=e.message}};
+    return app.replaceChildren(h("div",{class:"card"},h("h2",{},"إدارة النماذج"),em,pw,er,h("button",{onclick:go},"دخول")));
+  }
+  app.replaceChildren(h("p",{class:"mu"},"جاري التحميل…"));
+  try{[P,F]=[(await db("people"))||{},(await db("forms"))||{}]}
+  catch(e){if(!S)return show();return app.replaceChildren(h("div",{class:"card er"},"تعذّر الوصول إلى قاعدة البيانات. تأكد أن القواعد منشورة وأن بريدك هو المسؤول فيها.",h("br"),h("button",{onclick:()=>{S=null;keep();show()}},"خروج")))}
+  render();
+}
+
+function render(){
+  $("#app").replaceChildren(
+    h("div",{class:"bar"},h("b",{},"إدارة النماذج"),h("button",{class:"ghost",onclick:()=>{S=null;keep();show()}},"خروج")),
+    h("div",{class:"tabs"},...[["people","الأفراد"],["forms","النماذج"],["track","المتابعة"]].map(([k,l])=>h("button",{class:tab===k?"on":"",onclick:()=>{tab=k;render()}},l))),
+    h("div",{id:"body"}));
+  ({people:vPeople,forms:vForms,track:vTrack})[tab]();
+}
+
+/* ---- people ---- */
+function vPeople(){
+  const ta=h("textarea",{rows:5,placeholder:"الصق الأسماء الثلاثية، اسم في كل سطر (يمكنك نسخ عمود من Excel)"});
+  const ids=Object.keys(P).sort(byName);
+  $("#body").append(
+    h("div",{class:"card"},ta,h("button",{onclick:async()=>{
+      const have=new Set(Object.values(P).map(x=>x.name)),add={};let n=0;
+      ta.value.split("\n").map(s=>s.trim().replace(/\s+/g," ")).filter(Boolean).forEach(s=>{if(!have.has(s)){have.add(s);add["p"+Date.now().toString(36)+(n++).toString(36)]={name:s}}});
+      if(!n)return toast("لا توجد أسماء جديدة");
+      try{await db("people","PATCH",add);Object.assign(P,add);toast("أضيف "+n+" اسم");render()}catch{toast("تعذّر الحفظ، تحقق من القواعد")}
+    }},"إضافة الأسماء")),
+    h("p",{class:"mu"},ids.length+" اسم"),
+    ...ids.map(id=>h("div",{class:"row"},h("span",{},P[id].name),h("button",{class:"x",onclick:async()=>{
+      if(!confirm("حذف "+P[id].name+"؟"))return;
+      try{await db("people/"+id,"DELETE");delete P[id];render()}catch{toast("تعذّر الحذف")}
+    }},"✕"))));
+}
+
+/* ---- forms ---- */
+function vForms(){
+  const b=$("#body");
+  if(draft)return vBuilder();
+  const ids=Object.keys(F).sort((a,c)=>F[c].created-F[a].created);
+  b.append(h("button",{onclick:()=>{draft=newDraft();render()}},"+ نموذج جديد"),
+    ...ids.map(id=>h("div",{class:"card"},h("b",{},F[id].title),h("p",{class:"mu",dir:"ltr"},link(id)),
+      h("div",{class:"btns"},
+        h("button",{onclick:()=>copy(link(id))},"نسخ الرابط"),
+        h("button",{class:"ghost",onclick:()=>window.open(link(id),"_blank")},"فتح"),
+        h("button",{class:"ghost",onclick:()=>{cur=id;tab="track";render()}},"المتابعة"),
+        h("button",{class:"x",onclick:async()=>{
+          if(!confirm("حذف النموذج وكل ردوده؟"))return;
+          try{await db("forms/"+id,"DELETE");await db("responses/"+id,"DELETE");delete F[id];render()}catch{toast("تعذّر الحذف")}
+        }},"حذف")))));
+  if(!ids.length)b.append(h("p",{class:"mu"},"لا توجد نماذج بعد."));
+}
+function vBuilder(){
+  $("#body").append(
+    h("div",{class:"card"},
+      h("label",{},"عنوان النموذج"),h("input",{value:draft.title,oninput:e=>draft.title=e.target.value}),
+      h("label",{},"وصف (اختياري)"),h("textarea",{rows:2,value:draft.desc,oninput:e=>draft.desc=e.target.value})),
+    ...draft.qs.map((q,i)=>h("div",{class:"card"},
+      h("label",{},"سؤال "+(i+1)),h("input",{value:q.t,oninput:e=>q.t=e.target.value}),
+      h("select",{onchange:e=>{q.type=e.target.value;render()}},...TYPES.map(([v,l])=>h("option",{value:v,selected:q.type===v},l))),
+      q.type==="choice"&&h("textarea",{rows:3,placeholder:"الخيارات، كل خيار في سطر",value:q.opts,oninput:e=>q.opts=e.target.value}),
+      h("label",{class:"opt"},h("input",{type:"checkbox",checked:q.req,onchange:e=>q.req=e.target.checked}),"إجباري"),
+      h("button",{class:"x",onclick:()=>{draft.qs.splice(i,1);render()}},"حذف السؤال"))),
+    h("button",{class:"ghost",onclick:()=>{draft.qs.push({t:"",type:"text",opts:"",req:true});render()}},"+ سؤال"),
+    h("div",{class:"btns"},h("button",{onclick:saveForm},"حفظ وإنشاء الرابط"),h("button",{class:"ghost",onclick:()=>{draft=null;render()}},"إلغاء")));
+}
+async function saveForm(){
+  const qs=draft.qs.filter(q=>q.t.trim());
+  if(!draft.title.trim()||!qs.length)return toast("اكتب العنوان وسؤالًا واحدًا على الأقل");
+  const questions=qs.map(q=>{const o={t:q.t.trim(),type:q.type,req:!!q.req};
+    if(q.type==="choice"){const ops=q.opts.split("\n").map(s=>s.trim()).filter(Boolean);if(!ops.length)return null;o.opts=ops}return o});
+  if(questions.includes(null))return toast("أضف خيارات لأسئلة الاختيار");
+  const id="f"+Date.now().toString(36);
+  const f={title:draft.title.trim(),created:Date.now(),questions};
+  if(draft.desc.trim())f.desc=draft.desc.trim();
+  try{await db("forms/"+id,"PUT",f);F[id]=f;draft=null;cur=id;toast("تم إنشاء النموذج");render()}catch{toast("تعذّر الحفظ")}
+}
+
+/* ---- tracking ---- */
+async function vTrack(){
+  const b=$("#body");
+  const ids=Object.keys(F).sort((a,c)=>F[c].created-F[a].created);
+  if(!ids.length)return b.append(h("p",{class:"mu"},"لا توجد نماذج بعد."));
+  if(!cur||!F[cur])cur=ids[0];
+  b.append(h("select",{onchange:e=>{cur=e.target.value;render()}},...ids.map(id=>h("option",{value:id,selected:id===cur},F[id].title))),h("p",{class:"mu",id:"ld"},"جاري التحميل…"));
+  let R;try{R=(await db("responses/"+cur))||{}}catch{return toast("تعذّر تحميل الردود")}
+  if($("#body")!==b)return;
+  $("#ld").remove();
+  const f=F[cur],qs=(f.questions||[]).filter(Boolean);
+  const names=Object.keys(P).sort(byName),done=names.filter(id=>R[id]),left=names.filter(id=>!R[id]);
+  const when=r=>new Date(r.ts).toLocaleString("en-GB");
+  const shown=flt==="done"?done:flt==="left"?left:names;
+  b.append(
+    h("div",{class:"card"},h("b",{},`عبّأ ${done.length} من ${names.length}`),h("span",{class:"mu"}," — المتبقي "+left.length)),
+    h("div",{class:"btns"},
+      h("button",{onclick:()=>copy(link(cur))},"نسخ الرابط"),
+      h("button",{onclick:()=>exportX(f,qs,names,R)},"تصدير Excel"),
+      h("button",{class:"ghost",onclick:()=>copy(left.map(id=>P[id].name).join("\n"))},"نسخ أسماء من لم يعبّئ")),
+    h("div",{class:"tabs"},...[["all","الكل"],["left","لم يعبّئ"],["done","عبّأ"]].map(([k,l])=>h("button",{class:flt===k?"on":"",onclick:()=>{flt=k;render()}},l))),
+    ...shown.map(id=>{const r=R[id];
+      if(!r)return h("div",{class:"row"},h("span",{},"✗ "+P[id].name));
+      return h("details",{},h("summary",{},h("span",{class:"ok"},"✓ "),P[id].name,h("span",{class:"mu"}," — "+when(r))),
+        ...qs.map((q,i)=>h("div",{class:"mu"},q.t+": "+((r.answers&&r.answers["q"+i])||"—"))),
+        h("button",{class:"x",onclick:async()=>{
+          if(!confirm("حذف رد "+P[id].name+" لإعادة فتح الاسم؟"))return;
+          try{await db(`responses/${cur}/${id}`,"DELETE");render()}catch{toast("تعذّر الحذف")}
+        }},"حذف الرد"));
+    }));
+}
+function loadXlsx(){
+  if(window.XLSX)return Promise.resolve();
+  return new Promise((ok,no)=>{const s=document.createElement("script");s.src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";s.onload=ok;s.onerror=no;document.head.append(s)});
+}
+async function exportX(f,qs,names,R){
+  try{await loadXlsx()}catch{return toast("تعذّر تحميل مكتبة Excel")}
+  const rows=[["الاسم","الحالة","وقت التعبئة",...qs.map(q=>q.t)]];
+  names.forEach(id=>{const r=R[id];rows.push([P[id].name,r?"عبّأ":"لم يعبّئ",r?new Date(r.ts).toLocaleString("en-GB"):"",...qs.map((q,i)=>(r&&r.answers&&r.answers["q"+i])||"")])});
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(rows),"النتائج");
+  wb.Workbook={Views:[{RTL:true}]};
+  XLSX.writeFile(wb,f.title.replace(/[\\\/:*?"<>|]/g,"_")+".xlsx");
+}
+
+show();
+</script>
+</body>
+</html>
